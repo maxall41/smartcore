@@ -217,9 +217,12 @@ impl Default for ExtraTreesClassifierParameters {
     }
 }
 
-impl<TX: Number + FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY>>
-    SupervisedEstimator<X, Y, ExtraTreesClassifierParameters>
-    for ExtraTreesClassifier<TX, TY, X, Y>
+impl<
+    TX: Number + FloatNumber + PartialOrd + Send,
+    TY: Number + Ord,
+    X: Array2<TX> + Send + Sync,
+    Y: Array1<TY>,
+> SupervisedEstimator<X, Y, ExtraTreesClassifierParameters> for ExtraTreesClassifier<TX, TY, X, Y>
 {
     fn new() -> Self {
         Self {
@@ -252,7 +255,11 @@ impl<TX: FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY
         x: &X,
         y: &Y,
         parameters: ExtraTreesClassifierParameters,
-    ) -> Result<ExtraTreesClassifier<TX, TY, X, Y>, Failed> {
+    ) -> Result<ExtraTreesClassifier<TX, TY, X, Y>, Failed>
+    where
+        TX: Send,
+        X: Send + Sync,
+    {
         Self::fit_inner(x, y, None, parameters)
     }
 
@@ -273,7 +280,11 @@ impl<TX: FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY
         y: &Y,
         sample_weights: &[f64],
         parameters: ExtraTreesClassifierParameters,
-    ) -> Result<ExtraTreesClassifier<TX, TY, X, Y>, Failed> {
+    ) -> Result<ExtraTreesClassifier<TX, TY, X, Y>, Failed>
+    where
+        TX: Send,
+        X: Send + Sync,
+    {
         validate_sample_weights(sample_weights, x.shape().0)?;
         Self::fit_inner(x, y, Some(sample_weights), parameters)
     }
@@ -283,7 +294,11 @@ impl<TX: FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY
         y: &Y,
         sample_weights: Option<&[f64]>,
         parameters: ExtraTreesClassifierParameters,
-    ) -> Result<ExtraTreesClassifier<TX, TY, X, Y>, Failed> {
+    ) -> Result<ExtraTreesClassifier<TX, TY, X, Y>, Failed>
+    where
+        TX: Send,
+        X: Send + Sync,
+    {
         let classifier_params = BaseForestParameters {
             max_depth: parameters.max_depth,
             min_samples_leaf: parameters.min_samples_leaf,

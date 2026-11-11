@@ -1,4 +1,5 @@
 use rand::RngExt;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::fmt::Debug;
 
 #[cfg(feature = "serde")]
@@ -108,13 +109,19 @@ impl<
     /// * `x` - _NxM_ matrix with _N_ observations and _M_ features in each observation.
     /// * `y` - the target class values
     /// * `sample_weights`: optional sample_weights to use during fitting
-    pub fn fit<C: Criterion<Output = Out>>(
+    pub fn fit<C: Criterion<Output = Out> + Sync>(
         x: &X,
         y: &Y,
         sample_weights: Option<&[f64]>,
         criterion: &C,
         parameters: BaseForestParameters,
-    ) -> Result<BaseForest<TX, TY, X, Y, Out>, Failed> {
+    ) -> Result<BaseForest<TX, TY, X, Y, Out>, Failed>
+    where
+        TX: Send,
+        TY: Send,
+        X: Send + Sync,
+        Y: Send + Sync,
+    {
         let (n_rows, num_attributes) = x.shape();
 
         if n_rows != y.shape() {
@@ -140,8 +147,6 @@ impl<
             maybe_all_samples = Some(Vec::with_capacity(n_trees));
         }
 
-        let mut samples: Vec<usize> = (0..n_rows).map(|_| 1).collect();
-
         let dist = sample_weights
             .map(|weights| {
                 rand::distr::weighted::WeightedIndex::new(weights)
@@ -163,46 +168,53 @@ impl<
             Splitter::Random => None,
         };
 
-        // Draw all seeds for the trees beforehand. No interleaving with bootstrapping.
+        // Give each tree its own seed for bootstrap sampling and training.
         let tree_seeds: Vec<u64> = (0..n_trees).map(|_| rng.random()).collect();
-        for &seed_for_tree in &tree_seeds {
-            if parameters.bootstrap {
-                samples = BaseForest::<TX, TY, X, Y, Out>::sample_with_replacement(
-                    n_rows,
-                    &mut rng,
-                    dist.as_ref(),
-                );
-            }
+        let fitted_trees = tree_seeds
+            .par_iter()
+            .map(|&seed_for_tree| {
+                let samples = if parameters.bootstrap {
+                    let mut tree_rng = get_rng_impl(Some(seed_for_tree));
+                    Self::sample_with_replacement(n_rows, &mut tree_rng, dist.as_ref())
+                } else {
+                    (0..n_rows).map(|_| 1).collect()
+                };
+                let in_bag = parameters
+                    .keep_samples
+                    .then(|| samples.iter().map(|x| *x != 0).collect::<Vec<bool>>());
 
-            // keep samples is flag is on
-            if let Some(ref mut all_samples) = maybe_all_samples {
-                all_samples.push(samples.iter().map(|x| *x != 0).collect())
-            }
+                let params = BaseTreeParameters {
+                    max_depth: parameters.max_depth,
+                    min_samples_leaf: parameters.min_samples_leaf,
+                    min_samples_split: parameters.min_samples_split,
+                    seed: Some(seed_for_tree), // each tree gets its own seed from the forest RNG
+                    splitter: parameters.splitter,
+                };
+                // Only use sample weights on base tree if not already applied during bootstrapping
+                let sample_weights_for_base_tree = if parameters.bootstrap {
+                    None
+                } else {
+                    sample_weights
+                };
+                let tree = BaseTree::fit_weak_learner(
+                    x,
+                    y,
+                    sample_weights_for_base_tree,
+                    samples,
+                    mtry,
+                    order.as_deref(),
+                    criterion,
+                    params,
+                )?;
+                Ok((tree, in_bag))
+            })
+            .collect::<Result<Vec<_>, Failed>>()?;
 
-            let params = BaseTreeParameters {
-                max_depth: parameters.max_depth,
-                min_samples_leaf: parameters.min_samples_leaf,
-                min_samples_split: parameters.min_samples_split,
-                seed: Some(seed_for_tree), // each tree gets its own seed from the forest RNG
-                splitter: parameters.splitter,
-            };
-            // Only use sample weights on base tree if not already applied during bootstrapping
-            let sample_weights_for_base_tree = if parameters.bootstrap {
-                None
-            } else {
-                sample_weights
-            };
-            let tree = BaseTree::fit_weak_learner(
-                x,
-                y,
-                sample_weights_for_base_tree,
-                samples.clone(),
-                mtry,
-                order.as_deref(),
-                criterion,
-                params,
-            )?;
+        for (tree, in_bag) in fitted_trees {
             trees.push(tree);
+            if let (Some(all_samples), Some(in_bag)) = (&mut maybe_all_samples, in_bag) {
+                all_samples.push(in_bag);
+            }
         }
 
         Ok(BaseForest {
@@ -737,7 +749,15 @@ mod tests {
     }
 
     #[test]
-    fn fit_twice_with_same_seed_gives_identical_forest() {
+    fn fit_with_same_seed_is_independent_of_thread_count() {
+        let serial_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let parallel_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
         // With bootstrap, m = 1 and the Random splitter, each random path is used:
         // bootstrap sample, feature selection and random thresholds.
         let n_rows = 30;
@@ -764,9 +784,11 @@ mod tests {
                     splitter,
                 };
 
-                let forest_a = BaseForest::fit(&x, &y, weights, &MSECriterion, params.clone())
+                let forest_a = serial_pool
+                    .install(|| BaseForest::fit(&x, &y, weights, &MSECriterion, params.clone()))
                     .expect("Fit should work");
-                let forest_b = BaseForest::fit(&x, &y, weights, &MSECriterion, params.clone())
+                let forest_b = parallel_pool
+                    .install(|| BaseForest::fit(&x, &y, weights, &MSECriterion, params.clone()))
                     .expect("Fit should work");
 
                 assert_eq!(

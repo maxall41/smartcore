@@ -53,7 +53,7 @@ pub(crate) trait Criterion {
 }
 
 /// Value in a leaf of a tree.
-pub(crate) trait LeafOutput: Clone + Debug {
+pub(crate) trait LeafOutput: Clone + Debug + Send + Sync {
     fn approximate_eq(&self, other: &Self) -> bool;
 }
 

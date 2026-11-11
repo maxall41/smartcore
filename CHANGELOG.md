@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ensemble`: `RandomForestRegressor::predict_oob` and `ExtraTreesRegressor::predict_oob` return an error when a row is in-bag for all trees. Before this change, it returned `NaN` for a float target and panicked for an integer target.
 
 ### Changed
+- **Breaking change:** `ensemble`: forest training now runs in parallel. The random forest and extra trees `fit` methods require `TX: Send` and `X: Send + Sync`. Regressors also require `TY: Send` and `Y: Send + Sync`. Each tree uses its own RNG for bootstrap sampling. Results for a given seed differ from earlier versions.
 - `tree`, `ensemble`: `DecisionTreeClassifier` and `RandomForestClassifier` now use `BaseTree` and `BaseForest`, the same code as the regressors. The new `GiniCriterion`, `EntropyCriterion` and `ClassificationErrorCriterion` implement the `Criterion` trait. The entropy improvement uses a numerically stable formula that is never negative. Exactly tied splits can be broken in a different way, so fitted trees can differ slightly from earlier versions.
 - `tree`: `DecisionTreeClassifier` always shuffles the features, also when `mtry` equals the number of attributes, as the regressors do. Without a fixed `seed`, exactly tied splits can give different trees for each fit. Set `seed` to get reproducible trees.
 - `tree`, `ensemble`: `DecisionTreeClassifier` and `RandomForestClassifier` accept training data with one class, as scikit-learn does. The result is a tree with one leaf that always predicts that class, and `predict_proba` returns one column. Before this change, `fit` returned an error.
@@ -28,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking change:** `ensemble`: `seed` on `RandomForestRegressorParameters`, `RandomForestClassifierParameters` and `ExtraTreesRegressorParameters` is now `Option<u64>`. The search parameters are now `Vec<Option<u64>>`. With `None`, a seed is chosen at fit time (from OS entropy with `std_rand`).
 - `ensemble`: The default seed is now `None`, so default results change. With `std_rand`, they are no longer reproducible. Use `.with_seed(..)` for reproducible results.
 - **Breaking change:** `ensemble`: Postcard/bincode-serialized parameter structs from earlier versions no longer load. JSON still loads.
-- `ensemble`: each forest uses one RNG for bootstrap sampling and for the tree seeds (before: `seed + tree_idx`). Results for a given seed differ from earlier versions.
+- `ensemble`: each forest draws tree seeds from one RNG (before: `seed + tree_idx`). Results for a given seed differ from earlier versions.
 - **Breaking change:** `ensemble`: `ExtraTreesRegressorParameters` gets a public `bootstrap` field. Struct literals without `..Default::default()` must add `bootstrap: false` to keep the earlier behavior. Serialized parameters without this field still deserialize, with `bootstrap = false` (#520).
 - `ensemble`: Extra trees do not sort the feature columns. Trees are not bit-identical to the old ones because of different summation order.
 

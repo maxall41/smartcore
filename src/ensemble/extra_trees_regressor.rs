@@ -178,8 +178,12 @@ impl Default for ExtraTreesRegressorParameters {
     }
 }
 
-impl<TX: Number + FloatNumber + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1<TY>>
-    SupervisedEstimator<X, Y, ExtraTreesRegressorParameters> for ExtraTreesRegressor<TX, TY, X, Y>
+impl<
+    TX: Number + FloatNumber + PartialOrd + Send,
+    TY: Number + Send,
+    X: Array2<TX> + Send + Sync,
+    Y: Array1<TY> + Send + Sync,
+> SupervisedEstimator<X, Y, ExtraTreesRegressorParameters> for ExtraTreesRegressor<TX, TY, X, Y>
 {
     fn new() -> Self {
         Self {
@@ -211,7 +215,13 @@ impl<TX: Number + FloatNumber + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1
         x: &X,
         y: &Y,
         parameters: ExtraTreesRegressorParameters,
-    ) -> Result<ExtraTreesRegressor<TX, TY, X, Y>, Failed> {
+    ) -> Result<ExtraTreesRegressor<TX, TY, X, Y>, Failed>
+    where
+        TX: Send,
+        TY: Send,
+        X: Send + Sync,
+        Y: Send + Sync,
+    {
         Self::fit_inner(x, y, None, parameters)
     }
 
@@ -224,7 +234,13 @@ impl<TX: Number + FloatNumber + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1
         y: &Y,
         sample_weights: &[f64],
         parameters: ExtraTreesRegressorParameters,
-    ) -> Result<ExtraTreesRegressor<TX, TY, X, Y>, Failed> {
+    ) -> Result<ExtraTreesRegressor<TX, TY, X, Y>, Failed>
+    where
+        TX: Send,
+        TY: Send,
+        X: Send + Sync,
+        Y: Send + Sync,
+    {
         validate_sample_weights(sample_weights, x.shape().0)?;
         Self::fit_inner(x, y, Some(sample_weights), parameters)
     }
@@ -234,7 +250,13 @@ impl<TX: Number + FloatNumber + PartialOrd, TY: Number, X: Array2<TX>, Y: Array1
         y: &Y,
         sample_weights: Option<&[f64]>,
         parameters: ExtraTreesRegressorParameters,
-    ) -> Result<ExtraTreesRegressor<TX, TY, X, Y>, Failed> {
+    ) -> Result<ExtraTreesRegressor<TX, TY, X, Y>, Failed>
+    where
+        TX: Send,
+        TY: Send,
+        X: Send + Sync,
+        Y: Send + Sync,
+    {
         let regressor_params = BaseForestParameters {
             max_depth: parameters.max_depth,
             min_samples_leaf: parameters.min_samples_leaf,
