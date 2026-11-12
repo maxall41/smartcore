@@ -5,6 +5,11 @@
 //! Bigger number of estimators in general improves performance of the algorithm with an increased cost of training time.
 //! The random sample of _m_ predictors is typically set to be \\(\sqrt{p}\\) from the full set of _p_ predictors.
 //!
+//! Use `predict_proba` to get the fraction of trees that predict each class.
+//! The columns follow the sorted class labels. Use `predict` to get class labels.
+//!
+//! Reference: Breiman, L. (2001). Random Forests. Machine Learning, 45, 5–32.
+//!
 //! Example:
 //!
 //! ```
@@ -41,6 +46,7 @@
 //!
 //! let classifier = RandomForestClassifier::fit(&x, &y, Default::default()).unwrap();
 //! let y_hat = classifier.predict(&x).unwrap(); // use the same data for prediction
+//! let probabilities = classifier.predict_proba(&x).unwrap();
 //! ```
 //!
 //! <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
@@ -58,7 +64,8 @@ use crate::ensemble::base_forest::{
     BaseForest, BaseForestParameters, predict_mode, predict_mode_oob,
 };
 use crate::error::Failed;
-use crate::linalg::basic::arrays::{Array1, Array2};
+use crate::linalg::basic::arrays::{Array1, Array2, MutArray};
+use crate::linalg::basic::matrix::DenseMatrix;
 use crate::numbers::basenum::Number;
 use crate::numbers::floatnum::FloatNumber;
 
@@ -579,6 +586,60 @@ impl<TX: FloatNumber + PartialOrd, TY: Number + Ord, X: Array2<TX>, Y: Array1<TY
         }
     }
 
+    /// Predict class probabilities for each row of `x`.
+    ///
+    /// The result uses `f32` values, with one row per input sample and one column per class.
+    /// Columns follow the sorted class labels from the training targets.
+    /// Each value is the fraction of trees that predict that class.
+    /// Each row sums to 1 within floating-point precision.
+    ///
+    /// Returns an error if the model is not fitted or the forest has no trees.
+    ///
+    /// ```
+    /// use smartcore::ensemble::random_forest_classifier::{
+    ///     RandomForestClassifier, RandomForestClassifierParameters,
+    /// };
+    /// use smartcore::linalg::basic::arrays::Array;
+    /// use smartcore::linalg::basic::matrix::DenseMatrix;
+    ///
+    /// let x = DenseMatrix::from_2d_array(&[&[0.0], &[1.0], &[2.0], &[3.0]]).unwrap();
+    /// let y = vec![-7, -7, 100, 100];
+    /// let forest = RandomForestClassifier::fit(
+    ///     &x, &y, RandomForestClassifierParameters::default().with_seed(42),
+    /// ).unwrap();
+    /// let probabilities: DenseMatrix<f32> = forest.predict_proba(&x).unwrap();
+    /// assert_eq!(probabilities.shape(), (4, 2));
+    /// // Column 0 is class -7. Column 1 is class 100.
+    /// for row in 0..4 {
+    ///     let sum = probabilities.get((row, 0)) + probabilities.get((row, 1));
+    ///     assert!((sum - 1.0).abs() < 1e-6);
+    /// }
+    /// ```
+    pub fn predict_proba(&self, x: &X) -> Result<DenseMatrix<f32>, Failed> {
+        match (&self.forest_classifier, &self.classes) {
+            (Some(forest), Some(classes)) => {
+                let trees = forest.trees();
+                if trees.is_empty() {
+                    return Err(Failed::predict(
+                        "The forest must contain at least one tree to predict probabilities.",
+                    ));
+                }
+
+                let mut result = DenseMatrix::<f32>::zeros(x.shape().0, classes.len());
+                for row in 0..x.shape().0 {
+                    for tree in trees {
+                        result.add_element_mut((row, *tree.leaf_output_for_row(x, row)), 1.0);
+                    }
+                }
+                result.div_scalar_mut(trees.len() as f32);
+                Ok(result)
+            }
+            _ => Err(Failed::predict(
+                "'fit' should be called before calling 'predict_proba'",
+            )),
+        }
+    }
+
     /// Predict OOB classes for `x`. `x` is expected to be equal to the dataset used in training.
     pub fn predict_oob(&self, x: &X) -> Result<Y, Failed> {
         match (&self.forest_classifier, &self.classes) {
@@ -644,6 +705,102 @@ mod tests {
     use crate::linalg::basic::arrays::Array;
     use crate::linalg::basic::matrix::DenseMatrix;
     use crate::metrics::*;
+
+    #[cfg_attr(
+        all(target_arch = "wasm32", not(target_os = "wasi")),
+        wasm_bindgen_test::wasm_bindgen_test
+    )]
+    #[test]
+    fn predict_proba_binary_votes() {
+        // Constant features keep all trees at one leaf. Bootstrap samples can
+        // give different majority classes, so the probabilities are fractional.
+        let x = DenseMatrix::from_2d_array(&[&[0.0f32], &[0.0], &[0.0]]).unwrap();
+        let y = vec![100, -7, -7];
+        let forest = RandomForestClassifier::fit(
+            &x,
+            &y,
+            RandomForestClassifierParameters::default()
+                .with_n_trees(10)
+                .with_seed(42),
+        )
+        .unwrap();
+        let probe = DenseMatrix::from_2d_array(&[&[-1.0f32], &[1.0]]).unwrap();
+        let probabilities: DenseMatrix<f32> = forest.predict_proba(&probe).unwrap();
+        assert_eq!(probabilities.shape(), (2, 2));
+        for row in 0..2 {
+            let negative = *probabilities.get((row, 0));
+            let positive = *probabilities.get((row, 1));
+            assert!(negative > 0.0 && negative < 1.0);
+            assert!(positive > 0.0 && positive < 1.0);
+            assert!((negative + positive - 1.0).abs() < 1e-6);
+            assert!(negative > positive);
+        }
+        for class in 0..2 {
+            assert_eq!(probabilities.get((0, class)), probabilities.get((1, class)));
+        }
+        assert_eq!(forest.predict(&probe).unwrap(), vec![-7; 2]);
+    }
+
+    #[cfg_attr(
+        all(target_arch = "wasm32", not(target_os = "wasi")),
+        wasm_bindgen_test::wasm_bindgen_test
+    )]
+    #[test]
+    fn predict_proba_multiclass_columns() {
+        let x = DenseMatrix::from_2d_array(&[&[20.0], &[0.0], &[10.0]]).unwrap();
+        let y = vec![100, -7, 3];
+        // The only nonzero weight belongs to class 3. Each bootstrap sample
+        // omits the other classes, but their columns must still be present.
+        let forest = RandomForestClassifier::fit_with_weights(
+            &x,
+            &y,
+            &[0.0, 0.0, 1.0],
+            RandomForestClassifierParameters::default()
+                .with_n_trees(5)
+                .with_seed(42),
+        )
+        .unwrap();
+        let probabilities: DenseMatrix<f32> = forest.predict_proba(&x).unwrap();
+        assert_eq!(probabilities.shape(), (3, 3));
+        for row in 0..3 {
+            assert_eq!(*probabilities.get((row, 0)), 0.0);
+            assert_eq!(*probabilities.get((row, 1)), 1.0);
+            assert_eq!(*probabilities.get((row, 2)), 0.0);
+        }
+
+        let empty = x.take(&[], 0);
+        assert_eq!(forest.predict_proba(&empty).unwrap().shape(), (0, 3));
+    }
+
+    #[cfg_attr(
+        all(target_arch = "wasm32", not(target_os = "wasi")),
+        wasm_bindgen_test::wasm_bindgen_test
+    )]
+    #[test]
+    fn predict_proba_requires_fitted_forest_with_trees() {
+        let x = DenseMatrix::from_2d_array(&[&[0.0], &[1.0]]).unwrap();
+        let forest: RandomForestClassifier<f64, i32, DenseMatrix<f64>, Vec<i32>> =
+            RandomForestClassifier::new();
+        assert_eq!(
+            forest.predict_proba(&x).err(),
+            Some(Failed::predict(
+                "'fit' should be called before calling 'predict_proba'"
+            ))
+        );
+
+        let forest = RandomForestClassifier::fit(
+            &x,
+            &vec![0, 1],
+            RandomForestClassifierParameters::default().with_n_trees(0),
+        )
+        .unwrap();
+        assert_eq!(
+            forest.predict_proba(&x).err(),
+            Some(Failed::predict(
+                "The forest must contain at least one tree to predict probabilities."
+            ))
+        );
+    }
 
     #[test]
     fn search_parameters() {
@@ -977,6 +1134,10 @@ mod tests {
             postcard::from_bytes(&postcard::to_allocvec(&forest).unwrap()).unwrap();
 
         assert_eq!(forest, deserialized_forest);
+        assert_eq!(
+            forest.predict_proba(&x).unwrap(),
+            deserialized_forest.predict_proba(&x).unwrap()
+        );
     }
 
     #[cfg_attr(
@@ -1117,6 +1278,19 @@ mod tests {
         let forest = RandomForestClassifier::fit(&x, &y, params).unwrap();
         assert_eq!(forest.predict(&x).unwrap(), y);
 
+        let probabilities = forest.predict_proba(&x).unwrap();
+        assert_eq!(probabilities.shape(), (9, 3));
+        for (row, label) in y.iter().enumerate() {
+            let row_probabilities = probabilities.get_row(row);
+            assert!((row_probabilities.sum() - 1.0).abs() < 1e-6);
+            assert!(
+                row_probabilities
+                    .iterator(0)
+                    .all(|p| (0.0..=1.0).contains(p))
+            );
+            assert_eq!([-7, 3, 100][row_probabilities.argmax()], *label);
+        }
+
         // Each OOB prediction must be one of the original labels
         let oob = forest.predict_oob(&x).unwrap();
         assert!(oob.iter().all(|label| [-7, 3, 100].contains(label)));
@@ -1158,6 +1332,9 @@ mod tests {
         assert_eq!(forest.predict(&x).unwrap(), y);
         assert_eq!(forest.predict(&x_new).unwrap(), vec![5; 3]);
         assert_eq!(forest.predict_oob(&x).unwrap(), y);
+        let probabilities = forest.predict_proba(&x_new).unwrap();
+        assert_eq!(probabilities.shape(), (3, 1));
+        assert!(probabilities.iterator(0).all(|p| *p == 1.0));
     }
 
     #[test]

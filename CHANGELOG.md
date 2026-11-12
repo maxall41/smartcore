@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.0] - Unreleased
 
 ### Added
+- `ensemble`: `RandomForestClassifier::predict_proba` returns the fraction of tree votes for each class as a `DenseMatrix<f32>`. The columns follow the sorted class labels. `predict` still returns class labels.
 - `tree`, `ensemble`: `DecisionTreeClassifier` and `RandomForestClassifier` get a `fit_with_weights` method. `RandomForestClassifier` gets a `compute_feature_importances` method.
 - `tree`: `with_seed` on `DecisionTreeRegressorParameters` and `DecisionTreeClassifierParameters`.
 - `ensemble`: `ExtraTreesRegressorParameters` gets a `bootstrap` field and a `with_bootstrap` method. The default is `false`, so each tree still uses the whole dataset.
